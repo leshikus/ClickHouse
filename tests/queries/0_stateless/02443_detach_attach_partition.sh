@@ -22,7 +22,7 @@ function thread_detach()
         # Randomly choose one of the two tables each time.
         { $CLICKHOUSE_CLIENT -m 2>/dev/null <<SQL
 ALTER TABLE alter_table$((RANDOM % 2)) DETACH PARTITION ID 'all' SETTINGS log_comment = 'threaded detach';
-SELECT sleep($RANDOM / 32000) format Null;"
+SELECT sleep($RANDOM / 32000) format Null;
 SQL
         } || :
     done
@@ -33,7 +33,7 @@ function thread_attach()
         # Randomly choose one of the two tables each time.
         { $CLICKHOUSE_CLIENT -m 2>/dev/null <<SQL
 ALTER TABLE alter_table$((RANDOM % 2)) ATTACH PARTITION ID 'all' SETTINGS log_comment = 'threaded attach';
-SELECT sleep($RANDOM / 32000) format Null;"
+SELECT sleep($RANDOM / 32000) format Null;
 SQL
         } || :
     done
@@ -89,8 +89,8 @@ wait_for_queries_to_finish 600
 
 $CLICKHOUSE_CLIENT -q "SYSTEM SYNC REPLICA alter_table0"
 $CLICKHOUSE_CLIENT -q "SYSTEM SYNC REPLICA alter_table1"
-query_with_retry "ALTER TABLE alter_table0 ATTACH PARTITION ID 'all'" 2>/dev/null;
-$CLICKHOUSE_CLIENT -q "ALTER TABLE alter_table1 ATTACH PARTITION ID 'all'" 2>/dev/null
+query_with_retry "ALTER TABLE alter_table0 ATTACH PARTITION ID 'all'" "ATOMIC_RENAME_FAIL"
+query_with_retry "ALTER TABLE alter_table1 ATTACH PARTITION ID 'all'" "ATOMIC_RENAME_FAIL"
 $CLICKHOUSE_CLIENT -q "SYSTEM SYNC REPLICA alter_table1"
 $CLICKHOUSE_CLIENT -q "ALTER TABLE alter_table1 ATTACH PARTITION ID 'all'"
 $CLICKHOUSE_CLIENT -q "SYSTEM SYNC REPLICA alter_table0"
