@@ -9,14 +9,6 @@ CURDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 export MAX_RETRIES=25
 
-$CLICKHOUSE_CLIENT -q "
-    DROP TABLE IF EXISTS alter_table0;
-    DROP TABLE IF EXISTS alter_table1;
-
-    CREATE TABLE alter_table0 (a UInt8, b Int16) ENGINE = ReplicatedMergeTree('/clickhouse/tables/$CLICKHOUSE_TEST_ZOOKEEPER_PREFIX/alter_table', 'r1') ORDER BY a;
-    CREATE TABLE alter_table1 (a UInt8, b Int16) ENGINE = ReplicatedMergeTree('/clickhouse/tables/$CLICKHOUSE_TEST_ZOOKEEPER_PREFIX/alter_table', 'r2') ORDER BY a;
-" || exit 1
-
 function thread_detach()
 {
     while true; do
@@ -39,15 +31,10 @@ SQL
         } || :
     done
 }
-
-insert_type=$((RANDOM % 3))
-
-engine=$($CLICKHOUSE_CLIENT -q "SELECT engine FROM system.tables WHERE database=currentDatabase() AND table='alter_table0'")
-if [[ "$engine" == "ReplicatedMergeTree" || "$engine" == "SharedMergeTree" ]]; then
-    insert_type=$((RANDOM % 2))
-fi
-$CLICKHOUSE_CLIENT -q "SELECT '$CLICKHOUSE_DATABASE', 'insert_type $insert_type' FORMAT Null"
-
+function show_cluster_info()
+{
+    $CLICKHOUSE_CLIENT -q "select cluster, shard_num, replica_num, host_name, port, is_active from system.clusters"
+}
 function insert()
 {
     # Fault injection may lead to duplicates
@@ -63,19 +50,37 @@ function insert()
         $CLICKHOUSE_CLIENT --insert_deduplication_token="$1" -q "INSERT INTO alter_table$((RANDOM % 2)) SELECT $RANDOM, $1" 2>/dev/null
     fi
 }
-
-# Launch detach/attach threads
-for i in 0 1; do
-    thread_detach &
-    thread_attach &
-done
-
 function do_inserts()
 {
     for i in {1..30}; do
         while ! insert "$i"; do $CLICKHOUSE_CLIENT -q "SELECT '$CLICKHOUSE_DATABASE', 'retrying insert $i' FORMAT Null"; done
     done
 }
+
+show_cluster_info
+$CLICKHOUSE_CLIENT -q "
+    DROP TABLE IF EXISTS alter_table0;
+    DROP TABLE IF EXISTS alter_table1;
+
+    CREATE TABLE alter_table0 (a UInt8, b Int16) ENGINE = ReplicatedMergeTree('/clickhouse/tables/$CLICKHOUSE_TEST_ZOOKEEPER_PREFIX/alter_table', 'r1') ORDER BY a;
+    CREATE TABLE alter_table1 (a UInt8, b Int16) ENGINE = ReplicatedMergeTree('/clickhouse/tables/$CLICKHOUSE_TEST_ZOOKEEPER_PREFIX/alter_table', 'r2') ORDER BY a;
+" || exit 1
+
+insert_type=$((RANDOM % 3))
+
+engine=$($CLICKHOUSE_CLIENT -q "SELECT engine FROM system.tables WHERE database=currentDatabase() AND table='alter_table0'")
+if [[ "$engine" == "ReplicatedMergeTree" || "$engine" == "SharedMergeTree" ]]; then
+    insert_type=$((RANDOM % 2))
+fi
+$CLICKHOUSE_CLIENT -q "SELECT '$CLICKHOUSE_DATABASE', 'insert_type $insert_type' FORMAT Null"
+
+# Launch detach/attach threads
+
+show_cluster_info
+for i in 0 1; do
+    thread_detach &
+    thread_attach &
+done
 
 $CLICKHOUSE_CLIENT -q "SELECT '$CLICKHOUSE_DATABASE', 'begin inserts'"
 do_inserts 2>&1| grep -Fa "Exception: " | grep -Fv "was cancelled by concurrent ALTER PARTITION"
@@ -87,9 +92,11 @@ wait
 
 $CLICKHOUSE_CLIENT -q "SELECT '$CLICKHOUSE_DATABASE', 'threads finished'"
 wait_for_queries_to_finish 600
+show_cluster_info
 
 $CLICKHOUSE_CLIENT -q "SYSTEM SYNC REPLICA alter_table0"
 $CLICKHOUSE_CLIENT -q "SYSTEM SYNC REPLICA alter_table1"
+show_cluster_info
 query_with_retry "ALTER TABLE alter_table0 ATTACH PARTITION ID 'all'" "ATOMIC_RENAME_FAIL"
 query_with_retry "ALTER TABLE alter_table1 ATTACH PARTITION ID 'all'" "ATOMIC_RENAME_FAIL"
 $CLICKHOUSE_CLIENT -q "SYSTEM SYNC REPLICA alter_table1"
