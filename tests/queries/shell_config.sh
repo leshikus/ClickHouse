@@ -196,7 +196,7 @@ function query_with_retry()
     local ignore_result="$1"
     shift
 
-    local max_retries=5
+    local max_retries=${MAX_RETRIES:-5}
 
     for retry in {1..$max_retries}
     do
