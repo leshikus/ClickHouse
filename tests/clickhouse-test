@@ -112,7 +112,6 @@ def shell_get_output(cmd: str) -> str:
         text=True,
         encoding="utf-8",
         errors="replace",
-        capture_output=True,
         check=False,
     )
     return res.stdout.strip()
