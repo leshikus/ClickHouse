@@ -108,6 +108,7 @@ def shell_get_output(cmd: str) -> str:
         cmd,
         shell=True,
         executable=BASH,
+        stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
         encoding="utf-8",
