@@ -90,6 +90,7 @@ VERSION_PATTERN = r"^((\d+\.)?(\d+\.)?(\d+\.)?\d+)$"
 
 TEST_MAX_RUN_TIME_IN_SECONDS = 180
 
+
 def detect_cgroup_version():
     if os.path.exists("/sys/fs/cgroup/cgroup.controllers"):
         return 2
@@ -97,16 +98,16 @@ def detect_cgroup_version():
         return 1
     return None
 
+CGROUP_VERSION = detect_cgroup_version()
+
+
 BASH = "/bin/bash"
 
 def shell_check_output(cmd: str) -> str:
     return subprocess.check_output(
                 cmd, shell=True, executable=BASH, stderr=subprocess.STDOUT,
-                text=True, encoding="utf-8", errors="ignore",
+                text=True, encoding="utf-8", errors="replace",
             )
-
-
-CGROUP_VERSION = detect_cgroup_version()
 
 
 class SharedEngineReplacer:
@@ -617,14 +618,8 @@ def kill_process_group(pgid, fatal_log):
                 print(f"Cannot read {fatal_log}. Ignoring.")
 
             if not client_printed_stacktrace:
-                pgrep = subprocess.run(
-                    f"pgrep --pgroup {pgid} clickhouse",
-                    shell=True,
-                    executable=BASH,
-                    capture_output=True,
-                    text=False,
-                )
-                processes = pgrep.stdout.decode("utf-8").strip().split("\n")
+                pgrep = shell_check_output(f"pgrep --pgroup {pgid} clickhouse")
+                processes = pgrep.strip().split("\n")
                 processes = map(lambda x: x.strip(), processes)
                 processes = filter(lambda x: len(x) > 0, processes)
                 processes = list(map(lambda x: int(x.strip()), processes))
@@ -917,8 +912,6 @@ def get_stacktraces_from_clickhouse(args):
             "--skip_unavailable_shards=1",
         ]
     )
-
-    msg = ""
 
     if args.replicated_database:
         msg = (
