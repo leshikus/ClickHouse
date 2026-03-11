@@ -673,6 +673,8 @@ def cleanup_child_processes(pid):
     # possible via timeout(), but we are assuming that they will be killed by
     # timeout).
     pgrep = shell_get_output(f"pgrep --parent {pid}")
+    if pgrep == "":
+        return
     proc_list = pgrep.split("\n")
     processes = list(map(lambda x: int(x.strip()), proc_list))
     for child in processes:
