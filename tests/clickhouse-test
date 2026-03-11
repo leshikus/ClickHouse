@@ -103,11 +103,19 @@ CGROUP_VERSION = detect_cgroup_version()
 
 BASH = "/bin/bash"
 
-def shell_check_output(cmd: str) -> str:
-    return subprocess.check_output(
-                cmd, shell=True, executable=BASH, stderr=subprocess.STDOUT,
-                text=True, encoding="utf-8", errors="replace",
-            )
+def shell_get_output(cmd: str) -> str:
+    res = subprocess.run(
+        cmd,
+        shell=True,
+        executable=BASH,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+    )
+    return res.stdout.strip()
 
 
 class SharedEngineReplacer:
@@ -582,8 +590,7 @@ def kill_process_group(pgid, fatal_log):
     try:
         print(f"Processes left in process group {pgid}:")
         print(
-            shell_check_output(f"pgrep --pgroup {pgid} -a"),
-            end="",
+            shell_get_output(f"pgrep --pgroup {pgid} -a"),
         )
 
         if SANITIZED:
@@ -593,8 +600,7 @@ def kill_process_group(pgid, fatal_log):
         print(f"Killing process group {pgid}")
         print(f"Processes in process group {pgid}:")
         print(
-            shell_check_output(f"pgrep --pgroup {pgid} -a"),
-            end="",
+            shell_get_output(f"pgrep --pgroup {pgid} -a"),
         )
 
         if CAPTURE_CLIENT_STACKTRACE:
@@ -618,8 +624,8 @@ def kill_process_group(pgid, fatal_log):
                 print(f"Cannot read {fatal_log}. Ignoring.")
 
             if not client_printed_stacktrace:
-                pgrep = shell_check_output(f"pgrep --pgroup {pgid} clickhouse")
-                processes = pgrep.strip().split("\n")
+                pgrep = shell_get_output(f"pgrep --pgroup {pgid} clickhouse")
+                processes = pgrep.split("\n")
                 processes = map(lambda x: x.strip(), processes)
                 processes = filter(lambda x: len(x) > 0, processes)
                 processes = list(map(lambda x: int(x.strip()), processes))
@@ -659,16 +665,15 @@ def cleanup_child_processes(pid):
             return
         raise
     print(
-        shell_check_output(f"pgrep --parent {pid} -a"),
-        end="",
+        shell_get_output(f"pgrep --parent {pid} -a"),
     )
     # Due to start_new_session=True, it is not enough to kill by PGID, we need
     # to look at children processes as well.
     # But we are hoping that nobody creates session in the tests (though it is
     # possible via timeout(), but we are assuming that they will be killed by
     # timeout).
-    pgrep = shell_check_output(f"pgrep --parent {pid}")
-    proc_list = pgrep.strip().split("\n")
+    pgrep = shell_get_output(f"pgrep --parent {pid}")
+    proc_list = pgrep.split("\n")
     processes = list(map(lambda x: int(x.strip()), proc_list))
     for child in processes:
         try:
@@ -897,7 +902,7 @@ def get_transactions_list(args):
 # collect server stacktraces using gdb
 def get_stacktraces_from_gdb(pid):
     try:
-        return shell_check_output(f"gdb -batch -ex 'thread apply all backtrace' -p {pid}")
+        return shell_get_output(f"gdb -batch -ex 'thread apply all backtrace' -p {pid}")
     except Exception as e:
         print(f"Error occurred while receiving stack traces from gdb (for {pid}): {e}")
         return None
@@ -943,7 +948,7 @@ def get_stacktraces_from_clickhouse(args):
         )
 
     try:
-        return shell_check_output(msg)
+        return shell_get_output(msg)
     except Exception as e:
         print(f"Error occurred while receiving stack traces from client: {e}")
         return None
@@ -997,7 +1002,7 @@ def get_server_pid():
 
     for cmd in commands:
         try:
-            output = shell_check_output(cmd)
+            output = shell_get_output(cmd)
             if output:
                 return int(output)
         except Exception as e:
