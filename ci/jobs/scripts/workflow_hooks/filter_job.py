@@ -142,10 +142,12 @@ def should_skip_job(job_name):
     ):
         return True, f"Skipped, not labeled with '{Labels.CI_MACOS}'"
 
+    # TODO: remove once #103906/#103908 are validated
     if (
         JobNames.BUILD_TOOLCHAIN in job_name
         and _info_cache.pr_number
         and Labels.CI_TOOLCHAIN not in _info_cache.pr_labels
+        and not any("build_toolchain.py" in f for f in changed_files)
     ):
         return True, f"Skipped, not labeled with '{Labels.CI_TOOLCHAIN}'"
 
