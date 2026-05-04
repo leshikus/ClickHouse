@@ -1,3 +1,4 @@
+# TODO: remove — triggers toolchain build job in CI for testing
 import argparse
 import glob
 import os
