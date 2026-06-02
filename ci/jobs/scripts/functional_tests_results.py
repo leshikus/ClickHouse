@@ -21,16 +21,21 @@ DATABASE_SIGN = "Database: "
 _clickhouse_test = Path(__file__).resolve().parents[3] / "tests" / "clickhouse-test"
 STOP_TESTING_EXIT_CODE = runpy.run_path(str(_clickhouse_test))["STOP_TESTING_EXIT_CODE"]
 
-# Exit codes that mean the run was aborted mid-flight, so per-test results
-# (if any) are incomplete and we cannot trust which test "caused" the
-# failure. `STOP_TESTING_EXIT_CODE` is the in-band signal — the parent
-# raised `StopTesting` and reached the outer handler. The kill-by-signal
-# variants cover the out-of-band cases where the parent was killed before
-# it could exit through that handler (currently reachable via the
-# worker -> parent SIGTERM feedback loop in `stop_tests`: each worker the
-# parent terminates re-broadcasts SIGTERM to the whole process group via
-# `killpg`, hitting the parent before it can `sys.exit(STOP_TESTING_EXIT_CODE)`;
-# also covers external kills like job-level timeouts and runner shutdown).
+# Exit codes that mean `clickhouse-test` was killed by a signal mid-run, so
+# per-test results (if any) are incomplete and we cannot trust which test
+# "caused" the failure. Unlike `STOP_TESTING_EXIT_CODE` — the in-band signal
+# where the parent detected the server was gone and exited cleanly through
+# `StopTesting` — these are out-of-band kills where the parent never reached
+# that handler: external kills (job-level timeout, runner shutdown, OOM
+# killer) and the worker -> parent SIGTERM feedback loop in `stop_tests`
+# (each worker the parent terminates re-broadcasts SIGTERM to the whole
+# process group via `killpg`, hitting the parent before it can
+# `sys.exit(STOP_TESTING_EXIT_CODE)`).
+#
+# This is an error in the test runner / infrastructure rather than a product
+# test failure, so it is reported as a separate `clickhouse-test error`
+# (`ERROR`) leaf instead of being conflated with the `Server died` (`FAIL`)
+# bucket — the two have different causes and call for different follow-up.
 #
 # Both `128 + N` (bash's convention when its child died from signal N) and
 # the negative form `-N` are included: `Shell.run` wraps the command in
@@ -43,9 +48,8 @@ STOP_TESTING_EXIT_CODE = runpy.run_path(str(_clickhouse_test))["STOP_TESTING_EXI
 # checks (final hung-check, `runner_process_killed`, `total_tests_run == 0`)
 # that run AFTER all tests have finished. Per-test results in that case are
 # complete and authoritative and must not be demoted.
-ABORTED_RUN_EXIT_CODES = frozenset(
+CRASH_EXIT_CODES = frozenset(
     {
-        STOP_TESTING_EXIT_CODE,
         128 + signal.SIGTERM,  # 143
         128 + signal.SIGKILL,  # 137
         -signal.SIGTERM,  # -15
@@ -207,6 +211,23 @@ class FTResultsProcessor:
 
         return s
 
+    @staticmethod
+    def _demote_incomplete_failures(test_results):
+        # The run was aborted mid-flight, so the per-test failures we parsed
+        # are incomplete and cannot be trusted to identify the culprit.
+        failed_results = [r for r in test_results if r.is_failure()]
+        if len(failed_results) > 1:
+            # Multiple tests failed - this is a parallel run where we can't
+            # tell which test (if any) caused the abort. Mark them all as
+            # UNKNOWN so they don't pollute failure reports. The actual cause
+            # is captured by the synthetic leaf the caller appends (and, for a
+            # crashed server, by the LOGICAL_ERROR entry from the server log).
+            for result in failed_results:
+                result.status = Result.Status.UNKNOWN
+        elif len(failed_results) == 1:
+            # Single test failed - sequential run, this test is the culprit.
+            failed_results[0].status = Result.Status.ERROR
+
     def run(self, task_name="Tests", runner_exit_code: Optional[int] = None):
         state = Result.Status.OK
         s = self._process_test_output()
@@ -221,21 +242,28 @@ class FTResultsProcessor:
             test_results.append(
                 Result("Some queries hung", Result.Status.FAIL, info="Some queries hung")
             )
-        elif runner_exit_code in ABORTED_RUN_EXIT_CODES:
+        elif runner_exit_code == STOP_TESTING_EXIT_CODE:
+            # In-band abort: `clickhouse-test` detected the server was gone and
+            # exited cleanly through `StopTesting`. A product failure - the
+            # server died - so it blocks the merge as a FAIL.
             state = Result.Status.FAIL
-            failed_results = [r for r in test_results if r.is_failure()]
-            if len(failed_results) > 1:
-                # Multiple tests failed when the server died - this is a parallel
-                # run where we can't tell which test (if any) caused the crash.
-                # Mark them all as UNKNOWN so they don't pollute failure reports.
-                # The actual failure is captured by the "Server died" / LOGICAL_ERROR
-                # entry added from the server log.
-                for result in failed_results:
-                    result.status = Result.Status.UNKNOWN
-            elif len(failed_results) == 1:
-                # Single test failed - sequential run, this test is the culprit.
-                failed_results[0].status = Result.Status.ERROR
+            self._demote_incomplete_failures(test_results)
             test_results.append(Result("Server died", Result.Status.FAIL, info="Server died"))
+        elif runner_exit_code in CRASH_EXIT_CODES:
+            # `clickhouse-test` itself was killed by a signal mid-run (job
+            # timeout, runner shutdown, OOM killer, or the worker -> parent
+            # SIGTERM feedback loop). This is a runner / infrastructure error,
+            # not a product test failure, so it is reported in its own ERROR
+            # category rather than conflated with the "Server died" FAIL above.
+            state = Result.Status.ERROR
+            self._demote_incomplete_failures(test_results)
+            test_results.append(
+                Result(
+                    "clickhouse-test error",
+                    Result.Status.ERROR,
+                    info=f"clickhouse-test was killed (exit code {runner_exit_code})",
+                )
+            )
         elif not s.success_finish:
             state = Result.Status.ERROR
             info = "The test runner was terminated unexpectedly"
