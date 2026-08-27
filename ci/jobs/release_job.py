@@ -23,6 +23,7 @@ from ci.praktika.info import Info
 from ci.praktika.result import Result
 from ci.praktika.secret import Secret
 from ci.praktika.utils import Shell, Utils
+from ci.jobs.scripts.create_release import ReleaseContextManager, ReleaseProgress
 
 _GH_TOKEN_SECRET = Secret.Config(
     name="/github-tokens/robot-1",
@@ -205,8 +206,6 @@ def main():
             # all heads so those refs are present regardless of the release branch.
             "git fetch --quiet --no-recurse-submodules origin '+refs/heads/*:refs/remotes/origin/*'",
             "git fetch --quiet --tags --no-recurse-submodules origin",
-        ],
-        workdir=REPO_PATH,
     )
 
     step(
@@ -324,55 +323,17 @@ def main():
         workdir=REPO_PATH,
     )
 
-    # Prepare decides whether this run creates a new release (push tag, bump
-    # version, changelog PR) or only re-publishes artifacts for an existing /
-    # out-of-order ref. The creation steps below run only when it does; a
-    # recovery (skip-repo/skip-docker) or an out-of-order full run skips them
-    # without erroring and just re-exports repos / rebuilds docker.
-    # If a prior step failed (ok is False) the prepared flags are unread; default both landmarks to "already done" so no creation step fires.
-    is_tag_pushed = True
-    is_bump_landed = True
-    if ok:
-        with open(RELEASE_INFO_FILE) as f:
-            _prepared = json.load(f)
-        is_tag_pushed = _prepared["is_tag_pushed"]
-        is_bump_landed = _prepared["is_bump_landed"]
-
-    # skip-repo / skip-docker mark a partial run that only re-publishes artifacts
-    # for an already-created release (repo/Docker recovery). If the ref resolves
-    # to a new release, they would otherwise fall through to the creation steps
-    # below (push tag, bump version, PRs) and produce a partial new release, so
-    # reject that misuse and require the release tag instead.
-    if ok and not is_tag_pushed and (args.skip_repo or args.skip_docker):
-
-        def _require_recovery_ref():
-            raise RuntimeError(
+    def _push_git_tag_for_release():
+        with ReleaseContextManager(
+            release_progress=ReleaseProgress.PUSH_RELEASE_TAG
+        ) as release_info:
+            assert release_info.is_tag_pushed or not (args.skip_repo or args.skip_docker), (
                 "skip-repo/skip-docker re-publish an existing release and must be "
                 "run against its release tag (recovery); the given ref resolves to "
                 "a new release. Pass the release tag as the ref."
             )
-
-        step(name="Validate Recovery Ref", command=_require_recovery_ref)
-
-    # patch pushes its changelog to master; detect whether it is already there so a rerun is idempotent. The "new" bump self-checks the master version instead.
-    changelog_absent = False
-    if args.release_type == "patch":
-        if args.dry_run:
-            changelog_absent = not is_tag_pushed
-        elif ok:
-            with open(RELEASE_INFO_FILE) as f:
-                _info = json.load(f)
-            changelog_path = f"docs/changelogs/{_info['release_tag']}.md"
-            on_master = bool(
-                Shell.get_output(
-                    f"git ls-tree --name-only origin/master -- {shlex.quote(changelog_path)}"
-                ).strip()
-            )
-            changelog_absent = not on_master
-            print(
-                f"ChangeLog [{changelog_path}] on master: "
-                + ("yes — skipping" if on_master else "no — will push")
-            )
+            release_info.push_release_tag(dry_run=args.dry_run)
+    step(name="Push Git Tag for the Release", command=_push_git_tag_for_release)
 
     # Fail-fast: verify the release packages exist (this downloads them) before
     # pushing the tag or opening the changelog PR, so a missing-artifacts run
@@ -417,6 +378,27 @@ def main():
             ],
             workdir=REPO_PATH,
         )
+
+
+    # patch pushes its changelog to master; detect whether it is already there so a rerun is idempotent. The "new" bump self-checks the master version instead.
+    changelog_absent = False
+    if args.release_type == "patch":
+        if args.dry_run:
+            changelog_absent = not is_tag_pushed
+        elif ok:
+            with open(RELEASE_INFO_FILE) as f:
+                _info = json.load(f)
+            changelog_path = f"docs/changelogs/{_info['release_tag']}.md"
+            on_master = bool(
+                Shell.get_output(
+                    f"git ls-tree --name-only origin/master -- {shlex.quote(changelog_path)}"
+                ).strip()
+            )
+            changelog_absent = not on_master
+            print(
+                f"ChangeLog [{changelog_path}] on master: "
+                + ("yes — skipping" if on_master else "no — will push")
+            )
 
     if ok and args.release_type == "patch" and changelog_absent:
         with open(RELEASE_INFO_FILE) as f:

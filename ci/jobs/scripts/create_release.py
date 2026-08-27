@@ -848,11 +848,6 @@ def parse_args() -> argparse.Namespace:
         help="Initial step to prepare info like release branch, release tag, etc.",
     )
     parser.add_argument(
-        "--push-release-tag",
-        action="store_true",
-        help="Creates and pushes git tag",
-    )
-    parser.add_argument(
         "--push-new-release-branch",
         action="store_true",
         help="Creates and pushes new release branch and corresponding service gh tags for backports",
@@ -927,12 +922,6 @@ if __name__ == "__main__":
                 version=release_info.version,
             )
             p.run()
-
-    if args.push_release_tag:
-        with ReleaseContextManager(
-            release_progress=ReleaseProgress.PUSH_RELEASE_TAG
-        ) as release_info:
-            release_info.push_release_tag(dry_run=args.dry_run)
 
     if args.push_new_release_branch:
         with ReleaseContextManager(
