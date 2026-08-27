@@ -206,6 +206,8 @@ def main():
             # all heads so those refs are present regardless of the release branch.
             "git fetch --quiet --no-recurse-submodules origin '+refs/heads/*:refs/remotes/origin/*'",
             "git fetch --quiet --tags --no-recurse-submodules origin",
+        ],
+        workdir=REPO_PATH,
     )
 
     step(
@@ -333,11 +335,21 @@ def main():
                 "a new release. Pass the release tag as the ref."
             )
             release_info.push_release_tag(dry_run=args.dry_run)
-    step(name="Push Git Tag for the Release", command=_push_git_tag_for_release)
+
+    def _push_new_release_branch():
+        with ReleaseContextManager(
+            release_progress=ReleaseProgress.PUSH_NEW_RELEASE_BRANCH
+        ) as release_info:
+            release_info.push_new_release_branch(dry_run=args.dry_run)
+
+    def _bump_version():
+        with ReleaseContextManager(
+            release_progress=ReleaseProgress.BUMP_VERSION
+        ) as release_info:
+            release_info.update_version_and_contributors_list(dry_run=args.dry_run)
 
     # Fail-fast: verify the release packages exist (this downloads them) before
-    # pushing the tag or opening the changelog PR, so a missing-artifacts run
-    # aborts without leaving a tag / PR behind.
+    # pushing the tag, so a missing-artifacts run aborts without leaving a tag behind.
     if args.release_type == "patch" and not args.skip_repo:
         step(
             name="Download All Release Artifacts",
@@ -348,46 +360,33 @@ def main():
             workdir=REPO_PATH,
         )
 
-    if not is_tag_pushed:
-        step(
-            name="Push Git Tag for the Release",
-            command=[
-                f"python3 ./ci/jobs/scripts/create_release.py --push-release-tag"
-                f" {dry_run_flag}".strip()
-            ],
-            workdir=REPO_PATH,
-        )
+    step(
+        name="Push Git Tag for the Release",
+        command=_push_git_tag_for_release,
+        workdir=REPO_PATH,
+    )
 
-    if args.release_type == "new" and not is_tag_pushed:
-        step(
-            name="Push New Release Branch",
-            command=[
-                f"python3 ./ci/jobs/scripts/create_release.py --push-new-release-branch"
-                f" {dry_run_flag}".strip()
-            ],
-            workdir=REPO_PATH,
-        )
-
-    # "new" bumps master here (idempotent — it self-checks master's version). "patch" defers its branch bump to the end of the run for recovery-safety; see the deferred step near the end of main.
     if args.release_type == "new":
         step(
-            name="Bump CH Version and Update Contributors' List",
-            command=[
-                f"python3 ./ci/jobs/scripts/create_release.py --create-bump-version-pr"
-                f" {dry_run_flag}".strip()
-            ],
+            name="Push New Release Branch",
+            command=_push_new_release_branch,
             workdir=REPO_PATH,
         )
-
+        # "new" bumps master here (idempotent — it self-checks master's version). "patch" defers its branch bump to the end of the run for recovery-safety; see the deferred step near the end of main.
+        step(
+            name="Bump CH Version and Update Contributors' List",
+            command=_bump_version,
+            workdir=REPO_PATH,
+        )
 
     # patch pushes its changelog to master; detect whether it is already there so a rerun is idempotent. The "new" bump self-checks the master version instead.
     changelog_absent = False
-    if args.release_type == "patch":
+    if ok and args.release_type == "patch":
+        with open(RELEASE_INFO_FILE) as f:
+            _info = json.load(f)
         if args.dry_run:
-            changelog_absent = not is_tag_pushed
-        elif ok:
-            with open(RELEASE_INFO_FILE) as f:
-                _info = json.load(f)
+            changelog_absent = not _info["is_tag_pushed"]
+        else:
             changelog_path = f"docs/changelogs/{_info['release_tag']}.md"
             on_master = bool(
                 Shell.get_output(
@@ -726,14 +725,11 @@ def main():
     if results[-1].status != Result.Status.OK:
         ok = False
 
-    # Deferred to the end so a rerun before it sees an un-bumped branch and prepare recovers the release; `not is_bump_landed` completes an unfinished bump once and never rewrites a landed one.
-    if not is_bump_landed and args.release_type == "patch":
+    # Deferred to the end so a rerun before it sees an un-bumped branch and prepare recovers the release; the step self-skips a landed bump (late recovery), so it completes an unfinished bump once and never rewrites a landed one.
+    if args.release_type == "patch":
         step(
             name="Bump CH Version and Update Contributors' List",
-            command=[
-                f"python3 ./ci/jobs/scripts/create_release.py --create-bump-version-pr"
-                f" {dry_run_flag}".strip()
-            ],
+            command=_bump_version,
             workdir=REPO_PATH,
         )
 
