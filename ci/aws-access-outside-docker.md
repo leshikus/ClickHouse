@@ -44,10 +44,12 @@ The `praktika` pre-run (artifact download) and post-run (artifact and report upl
 | Stateless tests (`common_ft_job_config`, `functional_tests.py`) | `amd-medium`, `arm-medium` | bridge, `--privileged`; IMDS only if hop limit is 2 or more | SSM | `CIDB` connection for test targeting (`find_tests.py`), log cluster URL and password (`log_cluster.py`, `log_export.py`) | host resolves the secrets in pre-run; better, give the log cluster a per-job token |
 | Integration tests (`common_integration_test_job_config`) | `amd-medium`, `arm-medium` | host Docker socket, `--privileged` | SSM | `CIDB` connection for test targeting | host computes the targeted test list in pre-run; remove the socket mount (Docker in Docker only) |
 | Keeper stress (`keeper_stress_job`) | `arm-large` | host Docker socket, `--privileged` | none found | the socket exposes IMDS without a need | remove the socket mount |
+| Performance comparison (`performance_comparison_*_jobs`, `performance_tests.py`) | `amd-medium`, `arm-medium` | bridge; IMDS only if hop limit is 2 or more | SSM | `CIDB` connection secret (`CIDBCluster()`) to upload the dashboard tables; reference binaries and history come over anonymous HTTPS | upload the tables from a host post-hook, as the coverage job does |
+| LLVM coverage report (`llvm_coverage_job`, `llvm_coverage_job.py`) | `amd-small` | bridge; `~/.config/gh` mounted (`enable_gh_auth=True`) | none in the container; `CIDB` secret in the host post-hook `llvm_coverage_hook.py` | coverage of the PR; the GitHub token in the container is the same class of risk | keep AWS on the host; review the `gh` token mount |
 | SQLancer (`sqlancer_master_jobs`, `sqlancer_job.sh`) | `arm-medium` | bridge | S3 (to check) | result upload | declare artifacts |
 | Sign macOS binary (`sign_macos_binary_jobs`) | `release-runner` | host network, environment variables | STS, KMS, SSM | assume `release_signing`, sign with a KMS key through PKCS#11, read the Apple notary key | run the KMS PKCS#11 module on the host and give the container only the `p11-kit` socket; run notarization on the host |
 
-Not in the table: jobs in containers that use only anonymous HTTPS to public buckets (performance comparison, vector search stress, parser and storage memory checks, SQL tests). They need no credentials. Their containers still need IMDS blocked (lock 2 below).
+Not in the table: jobs in containers that use only anonymous HTTPS to public buckets (vector search stress, parser and storage memory checks, SQL tests). They need no credentials. Their containers still need IMDS blocked (lock 2 below).
 
 ## Risks and their locks {#risks}
 
