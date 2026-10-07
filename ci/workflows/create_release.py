@@ -35,6 +35,7 @@ workflow = Workflow.Config(
     # release_branches / pull_request do, so a failed release is not silent.
     enable_concurrency_queue=True,
     enable_slack_feed=True,
+    enable_cidb=True,
     inputs=[
         Workflow.Config.InputConfig(
             name="ref",
