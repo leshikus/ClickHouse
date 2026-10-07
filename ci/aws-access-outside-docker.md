@@ -28,7 +28,7 @@ Together: one leak in a container that the pull request controls can become a su
 4. **`--privileged`.** A privileged container can mount host devices and leave the container. A privileged container is the host for this threat model.
 5. **Environment variables.** `sign_macos_binary.py` assumes `release_signing` in the container and exports `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN` to all child processes.
 
-The `praktika` pre-run (artifact download) and post-run (artifact and report upload, `CIDB` insert) already run on the host. Jobs without `run_in_docker` (release, nightly, hourly and statistics jobs, stress, fuzzers, upgrade, `libFuzzer`, Jepsen, install check, Docker image jobs) already run their AWS calls on the host.
+The `praktika` pre-run (artifact download) and post-run (artifact and report upload, `CIDB` insert) already run on the host. Jobs without `run_in_docker` run their own AWS calls on the host, but the AST fuzzer, BuzzHouse and stress jobs start containers that read SSM themselves (see the tables below).
 
 ## Credentials in a job container {#credentials}
 
@@ -42,26 +42,56 @@ The `praktika` pre-run (artifact download) and post-run (artifact and report upl
 6. **Credentials made inside a job.** A job can exchange the IMDS credentials for other credentials and export them. `sign_macos_binary.py` calls `aws sts assume-role` for `release_signing` and puts the result into `AWS_*` variables, which every child process inherits.
 7. **Local runs.** `ci/local.env.example` suggests personal `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` for a private `sccache` bucket. `praktika` loads `ci/local.env` into its own environment and passes the file to `docker run --env-file`, so long-lived personal keys go into the container. `praktika` also loads the file in CI when it exists in the checkout (to check if a PR can add it).
 
-## Jobs that use AWS from a container {#jobs-table}
+## Credential access by job {#jobs-table}
 
-| Job (config in `ci/defs/job_configs.py`) | Runner | Path to credentials | AWS service | What for | Proposed move |
+The tables cover the 64 distinct jobs of all workflows, read from `_get_workflows`, and every call site of `Secret.get_value`, boto3, the AWS CLI, signed `S3` methods and `GHAuth` that each job reaches. "IMDS" in the network column means the container reaches IMDS on any pool. "Bridge" means it reaches IMDS only if the hop limit is 2 or more (open question 1). Secret names are SSM parameters unless stated otherwise.
+
+### In the job container that `praktika` starts {#in-job-container}
+
+| Job | Runs on PRs | Network | Credential | What for | Proposed move |
 |---|---|---|---|---|---|
-| Build (`common_build_job_config`, `build_clickhouse.py`) | `amd-large`, `arm-large` | host network | S3 `clickhouse-builds` | `sccache` and `clang-tidy` cache: read on PRs, read and write on `master` and release branches | `sccache` server or a signing cache proxy on the host; the container talks to it over a socket |
-| Fast test (`fast_test`, `fast_test.py`) | `amd-large` | host network | S3 | `sccache` read | same as Build |
-| Unit test bugfix validation (`bugfix_validation_ut_job`) | `amd-medium` | host network, `--privileged` | S3 | `sccache` read | same as Build |
-| Toolchain build (`toolchain_build_jobs`) | `arm-large` | host network | S3 | cache; to check if it uploads the toolchain | same as Build; upload as a `praktika` artifact |
-| Collect profiles (`collect_clickhouse_profiles_jobs`) | `arm-large` | host network | S3 (to check) | profile download and upload | declare artifacts; drop host network |
-| Bugfix validation, functional (`bugfix_validation_ft_pr_jobs`) | `arm-medium` | host network, `--privileged` | S3, SSM | old binary download, `CIDB` and log cluster secrets | host resolves inputs; drop host network |
-| ClickBench (`clickbench_jobs`) | `arm-medium` | host network | none found | host network exposes IMDS without a need | drop host network or block IMDS |
-| Stateless tests (`common_ft_job_config`, `functional_tests.py`) | `amd-medium`, `arm-medium` | bridge, `--privileged`; IMDS only if hop limit is 2 or more | SSM | `CIDB` connection for test targeting (`find_tests.py`), log cluster URL and password (`log_cluster.py`, `log_export.py`) | host resolves the secrets in pre-run; better, give the log cluster a per-job token |
-| Integration tests (`common_integration_test_job_config`) | `amd-medium`, `arm-medium` | host Docker socket, `--privileged` | SSM | `CIDB` connection for test targeting | host computes the targeted test list in pre-run; remove the socket mount (Docker in Docker only) |
-| Keeper stress (`keeper_stress_job`) | `arm-large` | host Docker socket, `--privileged` | none found | the socket exposes IMDS without a need | remove the socket mount |
-| Performance comparison (`performance_comparison_*_jobs`, `performance_tests.py`) | `amd-medium`, `arm-medium` | bridge; IMDS only if hop limit is 2 or more | SSM | `CIDB` connection secret (`CIDBCluster()`) to upload the dashboard tables; reference binaries and history come over anonymous HTTPS | upload the tables from a host post-hook, as the coverage job does |
-| LLVM coverage report (`llvm_coverage_job`, `llvm_coverage_job.py`) | `amd-small` | bridge; `~/.config/gh` mounted (`enable_gh_auth=True`) | none in the container; `CIDB` secret in the host post-hook `llvm_coverage_hook.py` | coverage of the PR; the GitHub token in the container is the same class of risk | keep AWS on the host; review the `gh` token mount |
-| SQLancer (`sqlancer_master_jobs`, `sqlancer_job.sh`) | `arm-medium` | bridge | S3 (to check) | result upload | declare artifacts |
-| Sign macOS binary (`sign_macos_binary_jobs`) | `release-runner` | host network, environment variables | STS, KMS, SSM | assume `release_signing`, sign with a KMS key through PKCS#11, read the Apple notary key | run the KMS PKCS#11 module on the host and give the container only the `p11-kit` socket; run notarization on the host |
+| Build (`build_clickhouse.py`) | yes, and merge queue | host, IMDS | instance role through `sccache` and `clang-tidy` cache | S3 cache in `clickhouse-builds`: read on PRs, read and write on `master` and release branches | `sccache` server or a signing cache proxy on the host |
+| Fast test (`fast_test.py`) | yes, and merge queue | host, IMDS | instance role through `sccache` | S3 cache read | as Build |
+| Bugfix validation, unit tests (`unit_tests_bugfix_validation_job.py`) | yes | host, IMDS | instance role through `sccache` | S3 cache read | as Build |
+| Build toolchain (`build_toolchain.py`) | yes | host, IMDS | none called; the role is reachable | none | drop host network |
+| Collect profiles (`collect_clickhouse_profiles.py`) | no | host, IMDS | none called; the role is reachable | none | drop host network |
+| Stateless tests (`functional_tests.py`) | yes, and merge queue | bridge | `clickhouse-test-stat-connection`; `clickhouse_ci_logs_host` and `clickhouse_ci_logs_password` | `CIDB` reads for test targeting (`find_tests.py`) and `CIDB` writes for per-test coverage; server log export to the CI logs cluster (`log_export.py`) | host resolves targeting in pre-run; log cluster gets a per-job write-only token |
+| Bugfix validation, functional (`functional_tests.py`) | yes | host, IMDS | as Stateless tests | as Stateless tests | as Stateless tests; drop host network |
+| Integration tests (`integration_test_job.py`) | yes | bridge, host Docker socket | `clickhouse-test-stat-connection` | `CIDB` reads for test targeting and for test durations to balance batches (`integration_tests_configs.py`), `CIDB` writes for coverage | host computes the test list and batches in pre-run; remove the socket mount |
+| Performance comparison (`performance_tests.py`) | yes | bridge | `clickhouse-test-stat-connection`; CI logs cluster secrets | dashboard table uploads to `CIDB`; server log export | uploads in a host post-hook; per-job log token |
+| ClickBench (`clickbench.py`) | yes | host, IMDS | CI logs cluster secrets | server log export | per-job log token; drop host network |
+| SQLStorm (`sqlstorm_test.py`) | yes | bridge | CI logs cluster secrets | server log export | per-job log token |
+| Build profile diff (`build_profile_diff_job.py`) | yes | bridge, `gh` mount | CI logs cluster secrets (`LogCluster`); GitHub App token | reads of build profiles; `gh api` calls | host post-hook for the reads |
+| LLVM coverage (`llvm_coverage_job.py`) | yes | bridge, `gh` mount | GitHub App token | `gh api` and `gh pr` calls | keep; limit the token permissions |
+| Style check (`check_style.py`) | yes, and merge queue | bridge, `gh` mount | GitHub App token | mounted by `enable_gh_auth`; no call found in the script | remove the mount |
+| PromQL compliance (`promql_compliance_job.py`) | yes | bridge, `gh` mount | GitHub App token | mounted by `enable_gh_auth`; no call found in the script | remove the mount |
+| Sign macOS binary (`sign_macos_binary.py`) | no, release branches | host, IMDS | role `release_runner`, then STS `release_signing` in `AWS_*` variables; `/release/apple-notary/notary_key` | KMS signing through PKCS#11; Apple notarization | KMS PKCS#11 module on the host behind a `p11-kit` socket; notarization on the host |
 
-Not in the table: jobs in containers that use only anonymous HTTPS to public buckets (vector search stress, parser and storage memory checks, SQL tests). They need no credentials. Their containers still need IMDS blocked (lock 2 below).
+No credential call in the container: unit tests, Keeper stress (has the host Docker socket), docs check, docs examples, `SQLLogic` test, `SQLTest`, SQLancer, SQLancerPP, parser and storage memory checks, WebAssembly parser build, vector search stress. Their downloads are anonymous HTTPS. Their containers still need IMDS blocked (lock 2 below).
+
+### In containers that a host job starts itself {#in-inner-container}
+
+| Job | Runs on PRs | Container | Credential | What for |
+|---|---|---|---|---|
+| AST fuzzer, BuzzHouse (`ast_fuzzer_job.py`, `run-fuzzer.sh`) | yes | `--network=host`, `--privileged`, IMDS | CI logs cluster secrets | server log export (`clickhouse_proc.py logs_export_config`) |
+| Stress test (`stress_job.py`, `stress_runner.sh`) | yes | bridge | CI logs cluster secrets | server log export |
+| Jepsen (`jepsen_check.py`) | no | `--network=host`, IMDS | SSH agent socket with `jepsen_ssh_key` | SSH to the Jepsen cluster |
+
+Upgrade check, `libFuzzer`, install check and compatibility check start containers that use no credentials.
+
+### On the host {#on-host}
+
+| Where | Credential | What for |
+|---|---|---|
+| `praktika` runner, every job | instance role; `clickhouse-test-stat-connection` | artifact and report S3 transfers in pre-run and post-run, `CIDB` insert of results |
+| `praktika` runner, `enable_gh_auth` jobs | instance role invokes the token minter Lambda (`GHAuth`) | GitHub App installation token, written to `~/.config/gh` and then mounted into the container |
+| `Config Workflow` and its hooks (`filter_job.py`, `version_log.py`) | instance role; `clickhouse-test-stat-connection` | workflow cache in S3, test targeting from `CIDB` |
+| `Dockers Build`, Docker server and keeper images | `clickhouse-dockerhub-registry`, `dockerhub_robot_password` | image push |
+| Post-hooks (`build_master_head_hook.py`, `promql_compliance_*_hook.py`, `llvm_coverage_hook.py`, `build_profile_hook.py`, `ingest_keeper_metrics.py`) | instance role; `clickhouse-test-stat-connection` | S3 uploads, `CIDB` inserts |
+| Release jobs (`release_job.py`, `release_branch_job.py`, `auto_release_job.py`) | GitHub token, Docker Hub, R2 test and production, GPG signing key | release publication; `release_job.py` writes the R2 keys to `~/.r2_auth*` |
+| Code review, changelog, revert of CI regressions | OpenAI keys, GitHub App token, `clickhouse-test-stat-connection` | AI review and reports |
+| Statistics, `libFuzzer` corpus, `clickhousectl` upload | instance role; `clickhouse-test-stat-connection` | S3 uploads, `CIDB` reads |
+| Jepsen | instance role (boto3 `autoscaling`, `ec2`); `jepsen_ssh_key` | scale the Jepsen cluster; SSH |
 
 ## Risks and their locks {#risks}
 
