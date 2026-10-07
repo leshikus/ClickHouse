@@ -30,6 +30,18 @@ Together: one leak in a container that the pull request controls can become a su
 
 The `praktika` pre-run (artifact download) and post-run (artifact and report upload, `CIDB` insert) already run on the host. Jobs without `run_in_docker` (release, nightly, hourly and statistics jobs, stress, fuzzers, upgrade, `libFuzzer`, Jepsen, install check, Docker image jobs) already run their AWS calls on the host.
 
+## Credentials in a job container {#credentials}
+
+`praktika` gives a job container no AWS credentials. The container gets credentials only when its own code fetches them.
+
+1. **What `docker run` passes.** `ci/praktika/runner.py` passes no `AWS_*` variable and does not mount `~/.aws`. The container gets the checkout, the staged `praktika` package, the `+-e` and `+--volume` settings from `run_in_docker`, `~/.config/gh` for jobs with `enable_gh_auth`, and `--env-file ci/local.env` when that file exists.
+2. **GitHub secrets.** The generated workflow exports each GitHub secret of the job into the environment of the host step (`TEMPLATE_SETUP_ENV_SECRETS` in `ci/praktika/yaml_generator.py`). A secret reaches the container only through `+-e NAME` in `run_in_docker`. No AWS key is a GitHub secret.
+3. **AWS secrets.** A `Secret.Config` of type `AWS_SSM_PARAMETER` or `AWS_SSM_SECRET` is not resolved in advance. `Secret.get_value` calls boto3 in the process that asks for the value, which is in the container for a containerized job.
+4. **The boto3 credential chain in the container.** boto3 and the AWS CLI try environment variables, then `~/.aws/config` and `~/.aws/credentials`, then IMDS. CI sets no variables and the images contain no `~/.aws`, so IMDS is the only source. The container therefore holds credentials exactly when it can reach IMDS, see the paths above.
+5. **What IMDS returns.** Temporary STS credentials of the instance role of the pool: an access key, a secret key and a session token. They expire after some hours, and the SDK fetches new ones by itself. They carry all permissions of the role, not the permissions of the job.
+6. **Credentials made inside a job.** A job can exchange the IMDS credentials for other credentials and export them. `sign_macos_binary.py` calls `aws sts assume-role` for `release_signing` and puts the result into `AWS_*` variables, which every child process inherits.
+7. **Local runs.** `ci/local.env.example` suggests personal `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` for a private `sccache` bucket. `praktika` loads `ci/local.env` into its own environment and passes the file to `docker run --env-file`, so long-lived personal keys go into the container. `praktika` also loads the file in CI when it exists in the checkout (to check if a PR can add it).
+
 ## Jobs that use AWS from a container {#jobs-table}
 
 | Job (config in `ci/defs/job_configs.py`) | Runner | Path to credentials | AWS service | What for | Proposed move |
