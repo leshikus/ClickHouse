@@ -155,7 +155,11 @@ fast_test_digest_config = Job.CacheDigestConfig(
 # not cover them).
 darwin_fast_test_digest_config = Job.CacheDigestConfig(
     include_paths=fast_test_digest_config.include_paths
-    + ["./ci/defs/darwin.skip", "./ci/jobs/scripts/fast_test_darwin.sh"],
+    + [
+        "./ci/defs/darwin.skip",
+        "./ci/jobs/scripts/fast_test_darwin.sh",
+        "./ci/jobs/scripts/job_hooks/debug_orphans_hook.py",
+    ],
 )
 
 TIDY_SHARDS = 4
